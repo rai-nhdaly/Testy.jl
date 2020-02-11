@@ -1,6 +1,7 @@
 module Testy
 
 using Test
+using Distributed: addprocs, rmprocs, remotecall_fetch, remotecall, RemoteException
 
 # TODO refactor into patch to bring these into Base
 
@@ -189,6 +190,56 @@ function runtests(fun::Function, depth::Int64=typemax(Int64), args...)
         fun()
     end
     state
+end
+
+macro distributed_testset(args...)
+    # Enforce that this occurs inside a `@sync` expression (since we need to keep the parent
+    # TestSet alive).
+    var = Base.sync_varname
+    test_proc = gensym("test_proc")
+    init_success = gensym("init_success")
+    future = gensym("future")
+    inner_ts = gensym("inner_ts")
+    ts = gensym("ts")
+    e = gensym("e")
+    test_error = gensym("test_error")
+
+    esc(quote
+        @assert $(Expr(:isdefined, var)) "@distributed_testset must be called within a @sync block!"
+        ($test_proc,) = $addprocs(1)
+        $init_success = $remotecall_fetch(()->begin
+            @eval begin
+                using Pkg
+                Pkg.activate($(Base.current_project()))
+                import Testy
+            end
+        end, $test_proc)
+        $future = $remotecall(()->begin
+            # Return the user created testset expression
+            $Testy.@testset $(args...)
+        end, $test_proc)
+        $Base.@async begin
+            try
+                $ts = fetch($future)
+                $rmprocs($test_proc)
+                @assert $ts isa $Test.DefaultTestSet
+                # Record the results of the TestSet into our parent TestSet, as if it wasn't remote.
+                $Test.finish($ts)
+            catch $e
+                if $e isa $RemoteException
+                    if $e.captured.ex isa $Test.TestSetException
+                        for $test_error in ee.errors_and_fails
+                            display($test_error)
+                        end
+                    end
+                    #$Base.display_error($e.captured.ex, $e.captured.processed_bt)
+                    $Base.rethrow($e.captured.ex)
+                else
+                    $Base.rethrow()
+                end
+            end
+        end
+    end)
 end
 
 """
