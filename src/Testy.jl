@@ -203,8 +203,11 @@ macro distributed_testset(args...)
     ts = gensym("ts")
     e = gensym("e")
     test_error = gensym("test_error")
+    default_testset = gensym("default_testset")
 
     esc(quote
+        # Create an outer testset to group the tests in this `distributed_testset`.
+        $default_testset = $Test.DefaultTestSet($args[1])
         @assert $(Expr(:isdefined, var)) "@distributed_testset must be called within a @sync block!"
         ($test_proc,) = $addprocs(1)
         $init_success = $remotecall_fetch(()->begin
@@ -224,21 +227,21 @@ macro distributed_testset(args...)
                 $rmprocs($test_proc)
                 @assert $ts isa $Test.DefaultTestSet
                 # Record the results of the TestSet into our parent TestSet, as if it wasn't remote.
-                $Test.finish($ts)
+                $Test.record($default_testset, $ts)
             catch $e
                 if $e isa $RemoteException
                     if $e.captured.ex isa $Test.TestSetException
-                        for $test_error in ee.errors_and_fails
-                            display($test_error)
+                        for $test_error in $e.captured.ex.errors_and_fails
+		              $Test.record($default_testset, $test_error)
                         end
                     end
-                    #$Base.display_error($e.captured.ex, $e.captured.processed_bt)
-                    $Base.rethrow($e.captured.ex)
                 else
                     $Base.rethrow()
                 end
             end
         end
+        # We finished running the tests. Call finish to display the result
+        $Test.finish($default_testset)
     end)
 end
 
